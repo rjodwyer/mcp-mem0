@@ -1,211 +1,139 @@
-<h1 align="center">MCP-Mem0: Long-Term Memory for AI Agents</h1>
+# MCP-Mem0 (Multi-User Fork)
 
-<p align="center">
-  <img src="public/Mem0AndMCP.png" alt="Mem0 and MCP Integration" width="600">
-</p>
+Fork of [coleam00/mcp-mem0](https://github.com/coleam00/mcp-mem0) with **per-user memory isolation** for multi-user environments like LibreChat.
 
-A template implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server integrated with [Mem0](https://mem0.ai) for providing AI agents with persistent memory capabilities.
+## What Changed
 
-Use this as a reference point to build your MCP servers yourself, or give this as an example to an AI coding assistant and tell it to follow this example for structure and code correctness!
+The original MCP-Mem0 uses a hardcoded `DEFAULT_USER_ID = "user"` for all memory operations — meaning every user shares the same memory pool. This fork adds automatic per-user scoping.
 
-## Overview
+### User Identification Priority
 
-This project demonstrates how to build an MCP server that enables AI agents to store, retrieve, and search memories using semantic search. It serves as a practical template for creating your own MCP servers, simply using Mem0 and a practical example.
+1. **`X-User-ID` HTTP header** — Set automatically by LibreChat via `{{LIBRECHAT_USER_ID}}` placeholder. Zero LLM involvement, fully automatic.
+2. **`X-User-Email` HTTP header** — Alternative header if email is preferred as user key.
+3. **`user_id` tool parameter** — Optional explicit parameter on each tool. Useful for testing or non-LibreChat clients.
+4. **`DEFAULT_USER_ID` env var** — Fallback for stdio transport or when no header/param is provided.
 
-The implementation follows the best practices laid out by Anthropic for building MCP servers, allowing seamless integration with any MCP-compatible client.
+### New Tool: `delete_all_memories`
 
-## Features
+Added a `delete_all_memories` tool with a `confirm` safety guard for GDPR/privacy compliance.
 
-The server provides three essential memory management tools:
+### Technical Implementation
 
-1. **`save_memory`**: Store any information in long-term memory with semantic indexing
-2. **`get_all_memories`**: Retrieve all stored memories for comprehensive context
-3. **`search_memories`**: Find relevant memories using semantic search
+- **`contextvars`** — Bridges HTTP request headers into async MCP tool handlers without modifying the MCP protocol.
+- **Starlette middleware** — Intercepts every SSE/streamable-http request, extracts user identity from headers, sets the context variable before the tool handler runs.
+- **Custom server startup** — Wraps FastMCP's SSE/streamable-http app with the middleware layer, using `uvicorn` directly.
 
-## Prerequisites
+## LibreChat Configuration
 
-- Python 3.12+
-- Supabase or any PostgreSQL database (for vector storage of memories)
-- API keys for your chosen LLM provider (OpenAI, OpenRouter, or Ollama)
-- Docker if running the MCP server as a container (recommended)
+```yaml
+# librechat.yaml
+mcpServers:
+  mem0:
+    type: sse
+    url: "http://mem0-mcp:8050/sse"
+    headers:
+      X-User-ID: "{{LIBRECHAT_USER_ID}}"
+    serverInstructions: |
+      You have access to persistent memory tools. Use them to remember user preferences,
+      project context, and important details across conversations.
+      - Call search_memories before answering questions that might benefit from past context.
+      - Call save_memory when the user shares preferences, project details, or asks you to remember something.
+      - User identification is automatic — do NOT pass user_id parameter unless testing.
+```
 
-## Installation
+## Docker Compose
 
-### Using uv
+```yaml
+services:
+  mem0-mcp:
+    build:
+      context: ./mcp-mem0
+      dockerfile: Dockerfile
+    container_name: mem0-mcp
+    ports:
+      - "8050:8050"
+    environment:
+      - TRANSPORT=sse
+      - LLM_PROVIDER=openai
+      - LLM_BASE_URL=http://litellm:4000/v1
+      - LLM_API_KEY=${LITELLM_MASTER_KEY}
+      - LLM_CHOICE=gpt-4.1-mini
+      - EMBEDDING_MODEL_CHOICE=text-embedding-3-small
+      - DATABASE_URL=postgresql://mem0user:mem0password@mem0-db:5432/mem0
+      - DEFAULT_USER_ID=default
+      - LOG_LEVEL=INFO
+      - OPENAI_API_KEY=${LITELLM_MASTER_KEY}
+      - OPENAI_BASE_URL=http://litellm:4000/v1
+    depends_on:
+      mem0-db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - librechat_default
 
-1. Install uv if you don't have it:
-   ```bash
-   pip install uv
-   ```
+  mem0-db:
+    image: pgvector/pgvector:pg16
+    container_name: mem0-db
+    environment:
+      - POSTGRES_USER=mem0user
+      - POSTGRES_PASSWORD=mem0password
+      - POSTGRES_DB=mem0
+    ports:
+      - "5433:5432"
+    volumes:
+      - mem0_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mem0user -d mem0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - librechat_default
 
-2. Clone this repository:
-   ```bash
-   git clone https://github.com/coleam00/mcp-mem0.git
-   cd mcp-mem0
-   ```
+volumes:
+  mem0_pgdata:
+```
 
-3. Install dependencies:
-   ```bash
-   uv pip install -e .
-   ```
+## Testing
 
-4. Create a `.env` file based on `.env.example`:
-   ```bash
-   cp .env.example .env
-   ```
-
-5. Configure your environment variables in the `.env` file (see Configuration section)
-
-### Using Docker (Recommended)
-
-1. Build the Docker image:
-   ```bash
-   docker build -t mcp/mem0 --build-arg PORT=8050 .
-   ```
-
-2. Create a `.env` file based on `.env.example` and configure your environment variables
-
-## Configuration
-
-The following environment variables can be configured in your `.env` file:
-
-| Variable | Description | Example |
-|----------|-------------|----------|
-| `TRANSPORT` | Transport protocol (sse or stdio) | `sse` |
-| `HOST` | Host to bind to when using SSE transport | `0.0.0.0` |
-| `PORT` | Port to listen on when using SSE transport | `8050` |
-| `LLM_PROVIDER` | LLM provider (openai, openrouter, or ollama) | `openai` |
-| `LLM_BASE_URL` | Base URL for the LLM API | `https://api.openai.com/v1` |
-| `LLM_API_KEY` | API key for the LLM provider | `sk-...` |
-| `LLM_CHOICE` | LLM model to use | `gpt-4o-mini` |
-| `EMBEDDING_MODEL_CHOICE` | Embedding model to use | `text-embedding-3-small` |
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host:port/db` |
-
-## Running the Server
-
-### Using uv
-
-#### SSE Transport
+### Verify per-user isolation
 
 ```bash
-# Set TRANSPORT=sse in .env then:
-uv run src/main.py
+# Save memory as user "alice"
+curl -X POST http://localhost:8050/messages \
+  -H "X-User-ID: alice" \
+  -H "Content-Type: application/json" \
+  -d '{"method": "tools/call", "params": {"name": "save_memory", "arguments": {"text": "Alice likes Python"}}}'
+
+# Search as user "bob" — should return empty
+curl -X POST http://localhost:8050/messages \
+  -H "X-User-ID: bob" \
+  -H "Content-Type: application/json" \
+  -d '{"method": "tools/call", "params": {"name": "search_memories", "arguments": {"query": "Python"}}}'
+
+# Search as user "alice" — should return the memory
+curl -X POST http://localhost:8050/messages \
+  -H "X-User-ID: alice" \
+  -H "Content-Type: application/json" \
+  -d '{"method": "tools/call", "params": {"name": "search_memories", "arguments": {"query": "Python"}}}'
 ```
 
-The MCP server will essentially be run as an API endpoint that you can then connect to with config shown below.
-
-#### Stdio Transport
-
-With stdio, the MCP client iself can spin up the MCP server, so nothing to run at this point.
-
-### Using Docker
-
-#### SSE Transport
+### Check logs for user resolution
 
 ```bash
-docker run --env-file .env -p:8050:8050 mcp/mem0
+docker logs mem0-mcp 2>&1 | grep "User ID"
+# Should show: "Header X-User-ID set: alice"
+# Should show: "User ID from HTTP header: alice"
 ```
 
-The MCP server will essentially be run as an API endpoint within the container that you can then connect to with config shown below.
+## Compatibility
 
-#### Stdio Transport
+- **LibreChat** — Full automatic per-user isolation via headers
+- **Claude Desktop / Cursor / Windsurf** — Use `user_id` tool parameter or `DEFAULT_USER_ID` env var
+- **n8n** — Use `DEFAULT_USER_ID` env var (single-user per instance) or pass `user_id` parameter
+- **stdio transport** — Falls back to `DEFAULT_USER_ID` (no HTTP headers available)
 
-With stdio, the MCP client iself can spin up the MCP server container, so nothing to run at this point.
+## Original
 
-## Integration with MCP Clients
-
-### SSE Configuration
-
-Once you have the server running with SSE transport, you can connect to it using this configuration:
-
-```json
-{
-  "mcpServers": {
-    "mem0": {
-      "transport": "sse",
-      "url": "http://localhost:8050/sse"
-    }
-  }
-}
-```
-
-> **Note for Windsurf users**: Use `serverUrl` instead of `url` in your configuration:
-> ```json
-> {
->   "mcpServers": {
->     "mem0": {
->       "transport": "sse",
->       "serverUrl": "http://localhost:8050/sse"
->     }
->   }
-> }
-> ```
-
-> **Note for n8n users**: Use host.docker.internal instead of localhost since n8n has to reach outside of it's own container to the host machine:
-> 
-> So the full URL in the MCP node would be: http://host.docker.internal:8050/sse
-
-Make sure to update the port if you are using a value other than the default 8050.
-
-### Python with Stdio Configuration
-
-Add this server to your MCP configuration for Claude Desktop, Windsurf, or any other MCP client:
-
-```json
-{
-  "mcpServers": {
-    "mem0": {
-      "command": "your/path/to/mcp-mem0/.venv/Scripts/python.exe",
-      "args": ["your/path/to/mcp-mem0/src/main.py"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "LLM_PROVIDER": "openai",
-        "LLM_BASE_URL": "https://api.openai.com/v1",
-        "LLM_API_KEY": "YOUR-API-KEY",
-        "LLM_CHOICE": "gpt-4o-mini",
-        "EMBEDDING_MODEL_CHOICE": "text-embedding-3-small",
-        "DATABASE_URL": "YOUR-DATABASE-URL"
-      }
-    }
-  }
-}
-```
-
-### Docker with Stdio Configuration
-
-```json
-{
-  "mcpServers": {
-    "mem0": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", 
-               "-e", "TRANSPORT", 
-               "-e", "LLM_PROVIDER", 
-               "-e", "LLM_BASE_URL", 
-               "-e", "LLM_API_KEY", 
-               "-e", "LLM_CHOICE", 
-               "-e", "EMBEDDING_MODEL_CHOICE", 
-               "-e", "DATABASE_URL", 
-               "mcp/mem0"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "LLM_PROVIDER": "openai",
-        "LLM_BASE_URL": "https://api.openai.com/v1",
-        "LLM_API_KEY": "YOUR-API-KEY",
-        "LLM_CHOICE": "gpt-4o-mini",
-        "EMBEDDING_MODEL_CHOICE": "text-embedding-3-small",
-        "DATABASE_URL": "YOUR-DATABASE-URL"
-      }
-    }
-  }
-}
-```
-
-## Building Your Own Server
-
-This template provides a foundation for building more complex MCP servers. To build your own:
-
-1. Add your own tools by creating methods with the `@mcp.tool()` decorator
-2. Create your own lifespan function to add your own dependencies (clients, database connections, etc.)
-3. Modify the `utils.py` file for any helper functions you need for your MCP server
-4. Feel free to add prompts and resources as well  with `@mcp.resource()` and `@mcp.prompt()`
+Based on [coleam00/mcp-mem0](https://github.com/coleam00/mcp-mem0) — MIT License.
