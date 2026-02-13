@@ -225,15 +225,35 @@ def _create_user_id_middleware():
 async def run_sse_with_middleware():
     """Run SSE transport with middleware for X-User-ID header extraction.
 
-    Uses add_middleware() directly on the FastMCP SSE app to avoid
-    lifespan issues with wrapping in a new Starlette app.
+    Replicates FastMCP's run_sse_async() internally but adds UserIDMiddleware
+    to the Starlette app before running. This is necessary because mcp 1.3.0
+    does not expose the Starlette app object directly.
     """
     import uvicorn
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route
 
-    # Get the SSE Starlette app from FastMCP (includes lifespan management)
-    app = mcp.sse_app()
+    sse = SseServerTransport("/messages/")
 
-    # Add middleware directly to the existing app (preserves lifespan)
+    async def handle_sse(request):
+        async with sse.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await mcp._mcp_server.run(
+                streams[0],
+                streams[1],
+                mcp._mcp_server.create_initialization_options(),
+            )
+
+    app = Starlette(
+        debug=mcp.settings.debug,
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse.handle_post_message),
+        ],
+    )
+
     app.add_middleware(_create_user_id_middleware())
 
     host = os.getenv("HOST", "0.0.0.0")
@@ -248,13 +268,40 @@ async def run_sse_with_middleware():
 
 
 async def run_streamable_http_with_middleware():
-    """Run Streamable HTTP transport with middleware for X-User-ID header extraction."""
+    """Run Streamable HTTP transport with middleware for X-User-ID header extraction.
+
+    Requires mcp >= 1.8.0 for streamable HTTP support. Falls back to SSE if unavailable.
+    """
+    try:
+        from mcp.server.streamable_http import StreamableHTTPServerTransport  # noqa: F401
+    except ImportError:
+        logger.warning(
+            "Streamable HTTP transport not available in this mcp version. "
+            "Falling back to SSE transport."
+        )
+        await run_sse_with_middleware()
+        return
+
     import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
 
-    # Get the streamable HTTP Starlette app from FastMCP
-    app = mcp.streamable_http_app()
+    transport_obj = StreamableHTTPServerTransport("/messages/")
 
-    # Add middleware directly
+    async def handle_request(request):
+        await transport_obj.handle_request(
+            request.scope, request.receive, request._send,
+            mcp._mcp_server,
+            mcp._mcp_server.create_initialization_options(),
+        )
+
+    app = Starlette(
+        debug=mcp.settings.debug,
+        routes=[
+            Mount("/messages/", app=handle_request),
+        ],
+    )
+
     app.add_middleware(_create_user_id_middleware())
 
     host = os.getenv("HOST", "0.0.0.0")
