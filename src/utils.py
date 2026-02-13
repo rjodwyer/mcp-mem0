@@ -10,6 +10,7 @@ For LiteLLM proxy compatibility, set:
 
 from mem0 import Memory
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 import os
 import logging
 
@@ -26,6 +27,16 @@ def get_mem0_client() -> Memory:
     llm_choice = os.getenv("LLM_CHOICE", "gpt-4.1-mini")
     embedding_model = os.getenv("EMBEDDING_MODEL_CHOICE", "text-embedding-3-small")
     database_url = os.getenv("DATABASE_URL", "")
+
+    # Parse DATABASE_URL into individual pgvector connection fields
+    parsed = urlparse(database_url)
+    pg_config = {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 5432,
+        "dbname": (parsed.path or "/mem0").lstrip("/"),
+        "user": parsed.username or "postgres",
+        "password": parsed.password or "",
+    }
 
     config = {
         "llm": {
@@ -44,9 +55,7 @@ def get_mem0_client() -> Memory:
         },
         "vector_store": {
             "provider": "pgvector",
-            "config": {
-                "url": database_url,
-            }
+            "config": pg_config,
         }
     }
 
